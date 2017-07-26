@@ -54,13 +54,13 @@ struct Peer {
 }
 
 impl Peer {
-	// whether this peer can fulfill the
+	// whether this peer can fulfill the necessary capabilities
 	fn can_fulfill(&self, c: &Capabilities) -> bool {
 		let caps = &self.capabilities;
 
-		caps.serve_headers == c.serve_headers &&
-			caps.serve_chain_since >= c.serve_chain_since &&
-			caps.serve_state_since >= c.serve_chain_since
+		caps.serve_headers >= c.serve_headers &&
+			(c.serve_chain_since.is_none() || caps.serve_chain_since <= c.serve_chain_since) &&
+			(c.serve_state_since.is_none() || caps.serve_state_since <= c.serve_state_since)
 	}
 }
 
@@ -244,7 +244,7 @@ impl OnDemand {
 			peers: RwLock::new(HashMap::new()),
 			in_transit: RwLock::new(HashMap::new()),
 			cache: cache,
-			no_immediate_dispatch: true,
+			no_immediate_dispatch: false,
 		}
 	}
 
@@ -334,6 +334,7 @@ impl OnDemand {
 	// dispatch pending requests, and discard those for which the corresponding
 	// receiver has been dropped.
 	fn dispatch_pending(&self, ctx: &BasicContext) {
+
 		// wrapper future for calling `poll_cancel` on our `Senders` to preserve
 		// the invariant that it's always within a task.
 		struct CheckHangup<'a, T: 'a>(&'a mut Sender<T>);
@@ -358,6 +359,8 @@ impl OnDemand {
 
 		if self.pending.read().is_empty() { return }
 		let mut pending = self.pending.write();
+
+		debug!(target: "on_demand", "Attempting to dispatch {} pending requests", pending.len());
 
 		// iterate over all pending requests, and check them for hang-up.
 		// then, try and find a peer who can serve it.
@@ -387,10 +390,11 @@ impl OnDemand {
 				}
 
 				// TODO: maximum number of failures _when we have peers_.
-				trace!(target: "pip", "No peer can serve request");
 				Some(pending)
 			})
 			.collect(); // `pending` now contains all requests we couldn't dispatch.
+
+		debug!(target: "on_demand", "Was unable to dispatch {} requests.", pending.len());
 	}
 
 	// submit a pending request set. attempts to answer from cache before
@@ -398,7 +402,6 @@ impl OnDemand {
 	fn submit_pending(&self, ctx: &BasicContext, mut pending: Pending) {
 		// answer as many requests from cache as we can, and schedule for dispatch
 		// if incomplete.
-		trace!(target: "on_demand", "submitting pending requests.");
 
 		pending.answer_from_cache(&*self.cache);
 		if let Some(mut pending) = pending.try_complete() {
